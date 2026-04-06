@@ -313,3 +313,10 @@ app.post("/api/verify-payment", requireAuth, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
+
+app.use(cors({
+  origin: [
+    "http://localhost:5173",           // local dev
+    "https://apex-home-stores.vercel.app/", // your Vercel frontend
+  ]
+}));
