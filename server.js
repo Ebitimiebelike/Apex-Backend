@@ -13,15 +13,20 @@ const PORT = process.env.PORT || 5000;
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ── Middleware ────────────────────────────────────────────────────
-app.use(
-  cors({
-    origin: [
-      "http://localhost:5173",
-      "https://apex-home-stores.vercel.app",
-      // add your production frontend domain(s) if different
-    ],
-  })
-);
+app.use(cors({
+  origin: (origin, cb) => {
+    const allowed =
+      !origin ||
+      origin === "http://localhost:5173" ||
+      origin === "https://apex-home-stores.vercel.app" ||
+      /^https:\/\/apex-home-stores.*\.vercel\.app$/.test(origin);
+
+    if (allowed) return cb(null, true);
+    return cb(new Error("Not allowed by CORS"));
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
 app.use(express.json());
 
 // ── Connect to MongoDB ────────────────────────────────────────────
