@@ -3,14 +3,11 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { Resend } = require("resend");
 const crypto = require("crypto");
-
 require("dotenv").config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ── Middleware ────────────────────────────────────────────────────
 app.use(cors({
@@ -27,6 +24,7 @@ app.use(cors({
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
+app.options("*", cors());
 app.use(express.json());
 
 // ── Connect to MongoDB ────────────────────────────────────────────
@@ -35,39 +33,58 @@ mongoose
   .then(() => console.log("✅ MongoDB connected"))
   .catch((err) => console.error("❌ MongoDB error:", err));
 
-// ── Helpers ─────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────
 function sha256(str) {
   return crypto.createHash("sha256").update(str).digest("hex");
+}
+
+function frontendUrl() {
+  return process.env.FRONTEND_URL || "http://localhost:5173";
+}
+
+async function sendEmailBrevo({ to, subject, html }) {
+  if (!process.env.BREVO_API_KEY) throw new Error("BREVO_API_KEY not configured");
+  if (!process.env.BREVO_SENDER_EMAIL) throw new Error("BREVO_SENDER_EMAIL not configured");
+
+  const resp = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "api-key": process.env.BREVO_API_KEY,
+    },
+    body: JSON.stringify({
+      sender: {
+        name: process.env.BREVO_SENDER_NAME || "Apex Home Furnishings",
+        email: process.env.BREVO_SENDER_EMAIL,
+      },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html,
+    }),
+  });
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(data?.message || `Brevo send failed (${resp.status})`);
+  }
+  return data;
 }
 
 // ════════════════════════════════════════════════════════════════
 // MODELS
 // ════════════════════════════════════════════════════════════════
 
-// ── User Model ───────────────────────────────────────────────────
 const UserSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
-
-  email: {
-    type: String,
-    required: true,
-    unique: true,
-    lowercase: true,
-    trim: true,
-  },
-
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true, minlength: 6 },
-
   createdAt: { type: Date, default: Date.now },
 
-  // NEW: Email verification fields
   isVerified: { type: Boolean, default: false },
-
   emailVerificationTokenHash: { type: String },
   emailVerificationExpires: { type: Date },
 });
 
-// Hash password before save
 UserSchema.pre("save", async function () {
   if (!this.isModified("password")) return;
   this.password = await bcrypt.hash(this.password, 10);
@@ -75,7 +92,6 @@ UserSchema.pre("save", async function () {
 
 const User = mongoose.model("User", UserSchema);
 
-// ── Order Model ──────────────────────────────────────────────────
 const OrderSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   orderNumber: { type: String, required: true },
@@ -116,13 +132,11 @@ function requireAuth(req, res, next) {
 // ROUTES
 // ════════════════════════════════════════════════════════════════
 
-// Health check
 app.get("/api/health", (req, res) => {
   res.json({ status: "Apex Backend running ✅" });
 });
 
-// ── REGISTER (send verification link) ─────────────────────────────
-// POST /api/auth/register
+// REGISTER (send verification link)
 app.post("/api/auth/register", async (req, res) => {
   try {
     const { name, email, password } = req.body;
@@ -131,65 +145,53 @@ app.post("/api/auth/register", async (req, res) => {
       return res.status(400).json({ message: "All fields are required." });
     }
     if (password.length < 6) {
-      return res
-        .status(400)
-        .json({ message: "Password must be at least 6 characters." });
+      return res.status(400).json({ message: "Password must be at least 6 characters." });
     }
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
     if (existingUser) {
-      return res
-        .status(400)
-        .json({ message: "An account with this email already exists." });
+      return res.status(400).json({ message: "An account with this email already exists." });
     }
 
-    // Create user as NOT verified yet
     const user = new User({ name, email, password, isVerified: false });
 
-    // Create verification token
+    // token
     const verificationToken = crypto.randomBytes(32).toString("hex");
     user.emailVerificationTokenHash = sha256(verificationToken);
-    user.emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+    user.emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
     await user.save();
 
-    // Need frontend URL to build verification link
-    const FRONTEND_URL = process.env.FRONTEND_URL;
-    if (!FRONTEND_URL) {
-      // cleanup created user if misconfigured
+    if (!process.env.FRONTEND_URL) {
       await User.findByIdAndDelete(user._id).catch(() => {});
       return res.status(500).json({ message: "FRONTEND_URL is not configured." });
     }
 
-    const verificationLink = `${FRONTEND_URL}/verify-email?token=${encodeURIComponent(
-      verificationToken
-    )}`;
+    // include email in link (optional, but helps frontend)
+    const verificationLink =
+      `${frontendUrl()}/verify-email?token=${encodeURIComponent(verificationToken)}` +
+      `&email=${encodeURIComponent(user.email)}`;
 
-    // Send email via Resend
     try {
-      await resend.emails.send({
-        from: "Apex Home Furnishings <onboarding@resend.dev>",
-        to: email,
+      await sendEmailBrevo({
+        to: user.email,
         subject: "Verify your Apex Home account",
         html: `
-          <div style="font-family: Georgia, serif; max-width: 560px; margin: 0 auto;">
+          <div style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto;">
             <div style="background-color: #8b7355; padding: 24px; text-align: center;">
               <h1 style="color: white; margin: 0; font-size: 22px;">Apex Home Furnishings</h1>
             </div>
-
             <div style="padding: 32px; background: #f9f6f2;">
-              <h2 style="margin-top: 0;">Welcome, ${name}! 🎉</h2>
+              <h2 style="margin-top: 0;">Welcome, ${name}!</h2>
               <p style="color: #5a5550; line-height: 1.7;">
                 Please verify your email to activate your account.
               </p>
-
               <a href="${verificationLink}"
                  style="display:inline-block;margin-top: 18px;padding: 14px 28px;
                         background-color:#8b7355;color:white;text-decoration:none;
                         font-weight:700;border-radius:6px;">
                 Verify Email
               </a>
-
               <p style="color:#777; font-size: 12px; margin-top: 16px;">
                 This link expires in 24 hours.
               </p>
@@ -198,56 +200,48 @@ app.post("/api/auth/register", async (req, res) => {
         `,
       });
     } catch (emailErr) {
-      console.error("Verification email failed:", emailErr.message);
-      // cleanup created user so they can re-register
+      console.error("Brevo verification email failed:", emailErr.message);
       await User.findByIdAndDelete(user._id).catch(() => {});
       return res.status(500).json({ message: "Could not send verification email." });
     }
 
-    // IMPORTANT: no JWT token here
     return res.status(201).json({
       message: "Verification email sent. Please check your inbox to activate your account.",
     });
   } catch (err) {
     console.error("Register error:", err);
-    res.status(500).json({ message: "Server error. Please try again." });
+    return res.status(500).json({ message: "Server error. Please try again." });
   }
 });
 
-// ── VERIFY EMAIL ───────────────────────────────────────────────────
-// GET /api/auth/verify-email?token=...
-app.get("/api/auth/verify-email", async (req, res) => {
+// VERIFY EMAIL (POST — matches your VerifyEmailPage)
+app.post("/api/auth/verify-email", async (req, res) => {
   try {
-    const { token } = req.query;
+    const { token } = req.body;
     if (!token) return res.status(400).json({ message: "Token is required." });
 
     const tokenHash = sha256(token);
 
     const user = await User.findOne({
       emailVerificationTokenHash: tokenHash,
+      emailVerificationExpires: { $gt: new Date() },
     });
 
-    if (!user) return res.status(400).json({ message: "Invalid token." });
-
-    if (!user.emailVerificationExpires || user.emailVerificationExpires < new Date()) {
-      return res.status(400).json({ message: "Token expired." });
-    }
+    if (!user) return res.status(400).json({ message: "Invalid or expired token." });
 
     user.isVerified = true;
     user.emailVerificationTokenHash = undefined;
     user.emailVerificationExpires = undefined;
-
     await user.save();
 
     return res.json({ message: "Email verified. You can now log in." });
   } catch (err) {
     console.error("Verify email error:", err);
-    res.status(500).json({ message: "Server error." });
+    return res.status(500).json({ message: "Server error." });
   }
 });
 
-// ── LOGIN (block if not verified) ──────────────────────────────────
-// POST /api/auth/login
+// LOGIN (block if not verified)
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -256,46 +250,42 @@ app.post("/api/auth/login", async (req, res) => {
       return res.status(400).json({ message: "Email and password are required." });
     }
 
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(401).json({ message: "Incorrect email or password." });
-    }
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) return res.status(401).json({ message: "Incorrect email or password." });
 
     if (!user.isVerified) {
-      return res.status(403).json({
-        message: "Please verify your email before logging in.",
-      });
+      return res.status(403).json({ message: "Please verify your email before logging in." });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(401).json({ message: "Incorrect email or password." });
-    }
+    if (!isMatch) return res.status(401).json({ message: "Incorrect email or password." });
 
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
 
-    res.json({
+    return res.json({
       token,
       user: { id: user._id, name: user.name, email: user.email },
     });
   } catch (err) {
     console.error("Login error:", err);
-    res.status(500).json({ message: "Server error. Please try again." });
+    return res.status(500).json({ message: "Server error. Please try again." });
   }
 });
 
-// ── GET CURRENT USER ──────────────────────────────────────────────
+// ME
 app.get("/api/auth/me", requireAuth, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select("-password");
     if (!user) return res.status(404).json({ message: "User not found." });
-    res.json({ user: { id: user._id, name: user.name, email: user.email, isVerified: user.isVerified } });
+    return res.json({
+      user: { id: user._id, name: user.name, email: user.email, isVerified: user.isVerified },
+    });
   } catch (err) {
-    res.status(500).json({ message: "Server error." });
+    return res.status(500).json({ message: "Server error." });
   }
 });
 
-// ── SAVE ORDER ────────────────────────────────────────────────────
+// Orders (unchanged)
 app.post("/api/orders", requireAuth, async (req, res) => {
   try {
     const { orderNumber, items, total, delivery, address, city, postcode, paystackRef } = req.body;
@@ -313,48 +303,72 @@ app.post("/api/orders", requireAuth, async (req, res) => {
     });
 
     await order.save();
-    res.status(201).json({ order });
+    return res.status(201).json({ order });
   } catch (err) {
     console.error("Save order error:", err);
-    res.status(500).json({ message: "Could not save order." });
+    return res.status(500).json({ message: "Could not save order." });
   }
 });
 
-// ── GET MY ORDERS ─────────────────────────────────────────────────
 app.get("/api/orders", requireAuth, async (req, res) => {
   try {
     const orders = await Order.find({ userId: req.userId }).sort({ createdAt: -1 });
-    res.json({ orders });
+    return res.json({ orders });
   } catch (err) {
-    res.status(500).json({ message: "Could not fetch orders." });
+    return res.status(500).json({ message: "Could not fetch orders." });
   }
 });
 
-// ── VERIFY PAYSTACK PAYMENT ───────────────────────────────────────
+// Paystack verify (unchanged)
 app.post("/api/verify-payment", requireAuth, async (req, res) => {
   try {
     const { reference } = req.body;
     if (!reference) return res.status(400).json({ message: "Reference required." });
 
-    const response = await fetch(
-      `https://api.paystack.co/transaction/verify/${reference}`,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-        },
-      }
-    );
+    const response = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
+      headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
+    });
 
     const data = await response.json();
 
     if (data.status && data.data.status === "success") {
-      res.json({ verified: true, amount: data.data.amount, reference });
-    } else {
-      res.json({ verified: false, message: "Payment not confirmed." });
+      return res.json({ verified: true, amount: data.data.amount, reference });
     }
+    return res.json({ verified: false, message: "Payment not confirmed." });
   } catch (err) {
     console.error("Payment verify error:", err);
-    res.status(500).json({ message: "Could not verify payment." });
+    return res.status(500).json({ message: "Could not verify payment." });
+  }
+});
+
+app.get("/api/verify-email", async (req, res) => {  
+  try {    
+    const { email } = req.query;    
+    if (!email) return res.status(400).json({ valid: false });    
+    
+    const response = await fetch(      
+      `https://emailvalidation.abstractapi.com/v1/?api_key=${process.env.ABSTRACT_API_KEY}&email=${encodeURIComponent(email)}`    
+    );    
+    const data = await response.json();    
+    
+    // Abstract API delivers strict metrics:
+    const isReal = (      
+      data.deliverability === "DELIVERABLE" &&      
+      data.is_valid_format?.value === true &&      
+      data.is_disposable_email?.value === false    
+    );    
+    
+    res.json({      
+      valid: isReal,      
+      reason: !data.is_valid_format?.value ? "Invalid email format."           
+            : data.is_disposable_email?.value ? "Disposable/temporary emails are not allowed." 
+            : data.deliverability !== "DELIVERABLE" ? "This email address does not exist." 
+            : "Valid",    
+    });  
+  } catch (err) {    
+    console.error("Email verification service error:", err);    
+    // Fail silently: If API breaks, allow registration rather than breaking sign-ups
+    res.json({ valid: true, reason: "Could not verify" });  
   }
 });
 
