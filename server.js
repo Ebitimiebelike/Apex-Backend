@@ -10,7 +10,7 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // ── Middleware ────────────────────────────────────────────────────
-app.use(cors({
+const corsOptions = {
   origin: (origin, cb) => {
     const allowed =
       !origin ||
@@ -23,9 +23,14 @@ app.use(cors({
   },
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
-}));
-// Change "*" to "(.*)" to support the new path-to-regexp version
-app.options("(.*)", cors());
+  preflightContinue: false,
+  optionsSuccessStatus: 204
+};
+
+// This applies CORS and handles ALL HTTP OPTIONS requests automatically 
+// without relying on Express's wildcard router.
+app.use(cors(corsOptions));
+
 app.use(express.json());
 
 // ── Connect to MongoDB ────────────────────────────────────────────
