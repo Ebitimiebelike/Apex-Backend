@@ -24,7 +24,8 @@ app.use(cors({
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
-app.options("*", cors());
+// Change "*" to "(.*)" to support the new path-to-regexp version
+app.options("(.*)", cors());
 app.use(express.json());
 
 // ── Connect to MongoDB ────────────────────────────────────────────
