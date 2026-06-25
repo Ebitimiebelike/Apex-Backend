@@ -366,6 +366,46 @@ app.get("/api/orders", requireAuth, async (req, res) => {
   }
 });
 
+app.get("/api/validate-checkout-email", async (req, res) => {  
+  try {    
+    const { email } = req.query;    
+    if (!email) return res.status(400).json({ valid: false, message: "Email is required." });    
+    
+    // The API key is safely hidden here on the server side
+    const response = await fetch(      
+      `https://emailvalidation.abstractapi.com/v1/?api_key=${process.env.ABSTRACT_API_KEY}&email=${encodeURIComponent(email)}`    
+    );    
+    
+    if (!response.ok) {
+      throw new Error("Abstract API network response failed");
+    }
+
+    const data = await response.json();    
+    
+    // Process the data securely on the server
+    const isValid = (      
+      data.deliverability === "DELIVERABLE" &&      
+      data.is_valid_format?.value === true &&      
+      data.is_disposable_email?.value === false    
+    );    
+    
+    let reason = "Valid";
+    if (data.is_valid_format?.value === false) {
+      reason = "Invalid email format.";
+    } else if (data.is_disposable_email?.value === true) {
+      reason = "Disposable/temporary emails are not allowed.";
+    } else if (data.deliverability !== "DELIVERABLE") {
+      reason = "This email address cannot be verified or does not exist.";
+    }
+
+    return res.json({ valid: isValid, reason });  
+  } catch (err) {    
+    console.error("Checkout email verification service error:", err);    
+    // Fail silently: if the API breaks or reaches limits, let the user check out
+    return res.json({ valid: true, reason: "Could not verify" });  
+  }
+});
+
 // Paystack verify (unchanged)
 app.post("/api/verify-payment", requireAuth, async (req, res) => {
   try {
