@@ -1,3 +1,4 @@
+const axios = require("axios");
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
@@ -371,38 +372,57 @@ app.get("/api/validate-checkout-email", async (req, res) => {
     const { email } = req.query;    
     if (!email) return res.status(400).json({ valid: false, message: "Email is required." });    
     
-    // The API key is safely hidden here on the server side
-    const response = await fetch(      
-      `https://emailvalidation.abstractapi.com/v1/?api_key=${process.env.ABSTRACT_API_KEY}&email=${encodeURIComponent(email)}`    
-    );    
-    
-    if (!response.ok) {
-      throw new Error("Abstract API network response failed");
-    }
+    console.log(`[Validation Request] Checking email: ${email}`);
 
-    const data = await response.json();    
+    const apiKey = process.env.ABSTRACT_API_KEY;
+    if (!apiKey) {
+      console.error("❌ Backend Error: ABSTRACT_API_KEY environment variable is missing on Render!");
+      return res.json({ valid: true, reason: "Server configuration missing key" });
+    }
     
-    // Process the data securely on the server
-    const isValid = (      
-      data.deliverability === "DELIVERABLE" &&      
-      data.is_valid_format?.value === true &&      
-      data.is_disposable_email?.value === false    
-    );    
+    // Using Axios instead of native fetch for rock-solid network requests
+    const response = await axios.get("https://emailvalidation.abstractapi.com/v1/", {
+      params: {
+        api_key: apiKey,
+        email: email
+      },
+      timeout: 6000 // 6 seconds timeout limit
+    });
+
+    const data = response.data;    
+    
+    console.log("➡️ Abstract API Raw Response Data:", JSON.stringify(data));
+    
+    // Strict Verification Logic
+    const isDeliverable = data.deliverability === "DELIVERABLE";
+    const isValidFormat = data.is_valid_format?.value === true;
+    const isNotDisposable = data.is_disposable_email?.value === false;
+
+    const isValid = isDeliverable && isValidFormat && isNotDisposable;
     
     let reason = "Valid";
-    if (data.is_valid_format?.value === false) {
+    if (!isValidFormat) {
       reason = "Invalid email format.";
-    } else if (data.is_disposable_email?.value === true) {
+    } else if (!isNotDisposable) {
       reason = "Disposable/temporary emails are not allowed.";
-    } else if (data.deliverability !== "DELIVERABLE") {
+    } else if (!isDeliverable) {
       reason = "This email address cannot be verified or does not exist.";
     }
 
+    console.log(`[Validation Result] Email: ${email} | Valid: ${isValid} | Reason: ${reason}`);
+
     return res.json({ valid: isValid, reason });  
   } catch (err) {    
-    console.error("Checkout email verification service error:", err);    
-    // Fail silently: if the API breaks or reaches limits, let the user check out
-    return res.json({ valid: true, reason: "Could not verify" });  
+    // Check if it's an Axios-specific network error to give you a clean log trace
+    if (err.response) {
+      console.error(`❌ Abstract API responded with status code: ${err.response.status}`);
+      console.error("Response data details:", err.response.data);
+    } else {
+      console.error("❌ Network connectivity error details:", err.message);
+    }
+    
+    // Fallback safety net: allow checkout if API is genuinely dead or rate-limited
+    return res.json({ valid: true, reason: "Could not verify service" });  
   }
 });
 
