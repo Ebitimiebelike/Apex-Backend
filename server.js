@@ -137,10 +137,12 @@ app.get("/api/health", (req, res) => {
 });
 
 // REGISTER (send verification link)
+// REGISTER (Validate email with Abstract, save user, then send Brevo verification link)
 app.post("/api/auth/register", async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
+    // 1. Input Validation
     if (!name || !email || !password) {
       return res.status(400).json({ message: "All fields are required." });
     }
@@ -148,11 +150,48 @@ app.post("/api/auth/register", async (req, res) => {
       return res.status(400).json({ message: "Password must be at least 6 characters." });
     }
 
+    // 2. Check if user already exists
     const existingUser = await User.findOne({ email: email.toLowerCase() });
     if (existingUser) {
       return res.status(400).json({ message: "An account with this email already exists." });
     }
 
+    // 3. STITCHED: Abstract API Validation Check
+    if (process.env.ABSTRACT_API_KEY) {
+      try {
+        const absResponse = await fetch(
+          `https://emailvalidation.abstractapi.com/v1/?api_key=${process.env.ABSTRACT_API_KEY}&email=${encodeURIComponent(email)}`
+        );
+        
+        if (absResponse.ok) {
+          const absData = await absResponse.json();
+          
+          // Check Abstract API's strict deliverability metrics
+          const isInvalidEmail = 
+            absData.deliverability !== "DELIVERABLE" || 
+            absData.is_disposable_email?.value === true || 
+            absData.is_valid_format?.value === false;
+
+          if (isInvalidEmail) {
+            let reason = "This email address is invalid or not deliverable.";
+            if (absData.is_disposable_email?.value === true) {
+              reason = "Disposable/temporary emails are not allowed.";
+            } else if (absData.is_valid_format?.value === false) {
+              reason = "Invalid email format.";
+            }
+            return res.status(400).json({ message: reason });
+          }
+        }
+      } catch (abstractErr) {
+        // Fail silently: If Abstract API is down or out of monthly credits, 
+        // we log it but don't block legitimate user sign-ups.
+        console.error("⚠️ Abstract API validation skipped due to error:", abstractErr.message);
+      }
+    } else {
+      console.warn("⚠️ Warning: ABSTRACT_API_KEY is missing from environment variables.");
+    }
+
+    // 4. Create User & Verification Tokens
     const user = new User({ name, email, password, isVerified: false });
 
     // token
@@ -172,6 +211,7 @@ app.post("/api/auth/register", async (req, res) => {
       `${frontendUrl()}/verify-email?token=${encodeURIComponent(verificationToken)}` +
       `&email=${encodeURIComponent(user.email)}`;
 
+    // 5. Send Email via Brevo
     try {
       await sendEmailBrevo({
         to: user.email,
@@ -201,6 +241,7 @@ app.post("/api/auth/register", async (req, res) => {
       });
     } catch (emailErr) {
       console.error("Brevo verification email failed:", emailErr.message);
+      // Clean up the created user if the email completely fails to send
       await User.findByIdAndDelete(user._id).catch(() => {});
       return res.status(500).json({ message: "Could not send verification email." });
     }
@@ -341,7 +382,7 @@ app.post("/api/verify-payment", requireAuth, async (req, res) => {
   }
 });
 
-app.get("/api/verify-email", async (req, res) => {  
+app.get("/api/validate-email-status", async (req, res) => {  
   try {    
     const { email } = req.query;    
     if (!email) return res.status(400).json({ valid: false });    
