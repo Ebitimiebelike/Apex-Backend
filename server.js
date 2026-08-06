@@ -130,7 +130,7 @@ function requireAuth(req, res, next) {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.userId = decoded.userId;
     next();
-  } catch (err) {
+  } catch {
     return res.status(401).json({ message: "Invalid or expired token" });
   }
 }
@@ -333,7 +333,7 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
     return res.json({
       user: { id: user._id, name: user.name, email: user.email, isVerified: user.isVerified },
     });
-  } catch (err) {
+  } catch {
     return res.status(500).json({ message: "Server error." });
   }
 });
@@ -374,7 +374,7 @@ app.get("/api/orders", requireAuth, async (req, res) => {
   try {
     const orders = await Order.find({ userId: req.userId }).sort({ createdAt: -1 });
     return res.json({ orders });
-  } catch (err) {
+  } catch {
     return res.status(500).json({ message: "Could not fetch orders." });
   }
 });
