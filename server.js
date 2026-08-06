@@ -196,6 +196,11 @@ app.post("/api/auth/register", async (req, res) => {
       }
     } else {
       console.warn("⚠️ Warning: ABSTRACT_API_KEY is missing from environment variables.");
+      // In production we require the Abstract email validation service to be configured
+      // to avoid allowing random or disposable emails to register.
+      if (process.env.NODE_ENV === "production") {
+        return res.status(500).json({ message: "Server misconfiguration: ABSTRACT_API_KEY is required in production." });
+      }
     }
 
     // 4. Create User & Verification Tokens
@@ -337,6 +342,13 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
 app.post("/api/orders", requireAuth, async (req, res) => {
   try {
     const { orderNumber, items, total, delivery, address, city, postcode, paystackRef } = req.body;
+
+    // Ensure the authenticated user has a verified email before placing orders
+    const requestingUser = await User.findById(req.userId);
+    if (!requestingUser) return res.status(404).json({ message: "User not found." });
+    if (!requestingUser.isVerified) {
+      return res.status(403).json({ message: "Please verify your email before placing an order." });
+    }
 
     const order = new Order({
       userId: req.userId,
