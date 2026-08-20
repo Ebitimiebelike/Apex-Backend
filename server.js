@@ -5,9 +5,11 @@ const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const { createClerkClient } = require("@clerk/backend");
 require("dotenv").config();
 
 const app = express();
+const clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 const PORT = process.env.PORT || 5000;
 
 // ── Middleware ────────────────────────────────────────────────────
@@ -118,19 +120,20 @@ const Order = mongoose.model("Order", OrderSchema);
 // ════════════════════════════════════════════════════════════════
 // AUTH MIDDLEWARE
 // ════════════════════════════════════════════════════════════════
-function requireAuth(req, res, next) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "Not authenticated" });
-  }
-
-  const token = authHeader.split(" ")[1];
-
+async function requireAuth(req, res, next) {
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.userId = decoded.userId;
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+
+    const token = authHeader.split(" ")[1];
+
+    const payload = await clerk.verifyToken(token);
+    req.userId = payload.sub;
     next();
-  } catch {
+  } catch (err) {
+    console.error("Auth error:", err);
     return res.status(401).json({ message: "Invalid or expired token" });
   }
 }
