@@ -84,19 +84,50 @@ async function sendEmailBrevo({ to, subject, html }) {
 // ════════════════════════════════════════════════════════════════
 
 const UserSchema = new mongoose.Schema({
-  name: { type: String, required: true, trim: true },
-  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-  password: { type: String, required: true, minlength: 6 },
-  createdAt: { type: Date, default: Date.now },
+  clerkId: {
+    type: String,
+    unique: true,
+    sparse: true,
+    index: true,
+  },
 
-  isVerified: { type: Boolean, default: false },
-  emailVerificationTokenHash: { type: String },
-  emailVerificationExpires: { type: Date },
-});
+  name: {
+    type: String,
+    trim: true,
+    default: "User",
+  },
 
-UserSchema.pre("save", async function () {
-  if (!this.isModified("password")) return;
-  this.password = await bcrypt.hash(this.password, 10);
+  email: {
+    type: String,
+    lowercase: true,
+    trim: true,
+  },
+
+  // Optional because Clerk now handles authentication.
+  // Kept for compatibility with older local accounts.
+  password: {
+    type: String,
+    minlength: 6,
+    required: false,
+  },
+
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+
+  isVerified: {
+    type: Boolean,
+    default: false,
+  },
+
+  emailVerificationTokenHash: {
+    type: String,
+  },
+
+  emailVerificationExpires: {
+    type: Date,
+  },
 });
 
 const User = mongoose.model("User", UserSchema);
@@ -123,19 +154,100 @@ const Order = mongoose.model("Order", OrderSchema);
 async function requireAuth(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
+
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({ message: "Not authenticated" });
+      return res.status(401).json({
+        message: "Not authenticated",
+      });
     }
 
     const token = authHeader.split(" ")[1];
 
+    if (!token) {
+      return res.status(401).json({
+        message: "Missing authentication token",
+      });
+    }
+
     const payload = await clerk.verifyToken(token);
-    req.userId = payload.sub;
+
+    if (!payload?.sub) {
+      return res.status(401).json({
+        message: "Invalid authentication token",
+      });
+    }
+
+    // Clerk user ID, e.g. user_2abc123...
+    req.clerkUserId = payload.sub;
+
     next();
   } catch (err) {
-    console.error("Auth error:", err);
-    return res.status(401).json({ message: "Invalid or expired token" });
+    console.error("Auth error:", err.message);
+
+    return res.status(401).json({
+      message: "Invalid or expired token",
+    });
   }
+}
+
+// Convert the authenticated Clerk user into the MongoDB User document.
+// Orders continue to store MongoDB ObjectIds, not Clerk IDs.
+async function getMongoUserFromClerk(req) {
+  const clerkUserId = req.clerkUserId;
+
+  if (!clerkUserId) {
+    throw new Error("Clerk user ID is missing");
+  }
+
+  let user = await User.findOne({ clerkId: clerkUserId });
+
+  if (user) {
+    return user;
+  }
+
+  const clerkUser = await clerk.users.getUser(clerkUserId);
+
+  const email =
+    clerkUser.emailAddresses?.find(
+      (emailAddress) =>
+        emailAddress.id === clerkUser.primaryEmailAddressId
+    )?.emailAddress ||
+    clerkUser.emailAddresses?.[0]?.emailAddress ||
+    "";
+
+  const name =
+    clerkUser.fullName ||
+    clerkUser.firstName ||
+    "User";
+
+  if (!email) {
+    throw new Error("Authenticated Clerk user has no email address");
+  }
+
+  // Link an existing MongoDB account with the same email, if present.
+  user = await User.findOne({
+    email: email.toLowerCase(),
+  });
+
+  if (user) {
+    user.clerkId = clerkUserId;
+    user.name = name;
+    user.email = email.toLowerCase();
+    user.isVerified = true;
+
+    await user.save();
+    return user;
+  }
+
+  // First authenticated Clerk login: create the MongoDB profile.
+  user = await User.create({
+    clerkId: clerkUserId,
+    name,
+    email: email.toLowerCase(),
+    isVerified: true,
+  });
+
+  return user;
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -331,30 +443,56 @@ app.post("/api/auth/login", async (req, res) => {
 // ME
 app.get("/api/auth/me", requireAuth, async (req, res) => {
   try {
-    const user = await User.findById(req.userId).select("-password");
-    if (!user) return res.status(404).json({ message: "User not found." });
+    const user = await getMongoUserFromClerk(req);
+
     return res.json({
-      user: { id: user._id, name: user.name, email: user.email, isVerified: user.isVerified },
+      user: {
+        id: user._id,
+        clerkId: user.clerkId,
+        name: user.name,
+        email: user.email,
+        isVerified: user.isVerified,
+      },
     });
-  } catch {
-    return res.status(500).json({ message: "Server error." });
+  } catch (err) {
+    console.error("Get current user error:", err);
+
+    return res.status(500).json({
+      message: "Could not load user.",
+    });
   }
 });
 
 // Orders (unchanged)
 app.post("/api/orders", requireAuth, async (req, res) => {
   try {
-    const { orderNumber, items, total, delivery, address, city, postcode, paystackRef } = req.body;
+    const {
+      orderNumber,
+      items,
+      total,
+      delivery,
+      address,
+      city,
+      postcode,
+      paystackRef,
+    } = req.body;
 
-    // Ensure the authenticated user has a verified email before placing orders
-    const requestingUser = await User.findById(req.userId);
-    if (!requestingUser) return res.status(404).json({ message: "User not found." });
-    if (!requestingUser.isVerified) {
-      return res.status(403).json({ message: "Please verify your email before placing an order." });
+    if (!orderNumber || !items || !total) {
+      return res.status(400).json({
+        message: "Order information is incomplete.",
+      });
+    }
+
+    const user = await getMongoUserFromClerk(req);
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found.",
+      });
     }
 
     const order = new Order({
-      userId: req.userId,
+      userId: user._id,
       orderNumber,
       items,
       total,
@@ -366,19 +504,40 @@ app.post("/api/orders", requireAuth, async (req, res) => {
     });
 
     await order.save();
+
     return res.status(201).json({ order });
   } catch (err) {
     console.error("Save order error:", err);
-    return res.status(500).json({ message: "Could not save order." });
+
+    return res.status(500).json({
+      message: "Could not save order.",
+    });
   }
 });
 
 app.get("/api/orders", requireAuth, async (req, res) => {
   try {
-    const orders = await Order.find({ userId: req.userId }).sort({ createdAt: -1 });
+    const user = await getMongoUserFromClerk(req);
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found.",
+      });
+    }
+
+    const orders = await Order.find({
+      userId: user._id,
+    }).sort({
+      createdAt: -1,
+    });
+
     return res.json({ orders });
-  } catch {
-    return res.status(500).json({ message: "Could not fetch orders." });
+  } catch (err) {
+    console.error("Fetch orders error:", err);
+
+    return res.status(500).json({
+      message: "Could not fetch orders.",
+    });
   }
 });
 
