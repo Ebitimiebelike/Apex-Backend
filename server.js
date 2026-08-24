@@ -5,7 +5,10 @@ const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
-const { createClerkClient } = require("@clerk/backend");
+const {
+  createClerkClient,
+  verifyToken,
+} = require("@clerk/backend");
 require("dotenv").config();
 
 const app = express();
@@ -169,7 +172,9 @@ async function requireAuth(req, res, next) {
       });
     }
 
-    const payload = await clerk.verifyToken(token);
+     const payload = await verifyToken(token, {
+  secretKey: process.env.CLERK_SECRET_KEY,
+});
 
     if (!payload?.sub) {
       return res.status(401).json({

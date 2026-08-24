@@ -1,17 +1,19 @@
 {
+  "$schema": "https://json.schemastore.org/package.json",
   "name": "apex-backend",
   "version": "1.0.0",
   "type": "commonjs",
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "dev": "node --watch server.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@clerk/backend": "^3.16.9",
+    "@clerk/backend": "^3.16.10",
     "axios": "^1.18.1",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
