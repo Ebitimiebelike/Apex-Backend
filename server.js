@@ -482,7 +482,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
       paystackRef,
     } = req.body;
 
-    if (!orderNumber || !items || !total) {
+    if (!orderNumber || !Array.isArray(items) || items.length === 0 || !Number.isFinite(Number(total))) {
       return res.status(400).json({
         message: "Order information is incomplete.",
       });
@@ -512,10 +512,18 @@ app.post("/api/orders", requireAuth, async (req, res) => {
 
     return res.status(201).json({ order });
   } catch (err) {
-    console.error("Save order error:", err);
+    console.error("Save order error:", {
+      message: err.message,
+      name: err.name,
+      code: err.code,
+      stack: err.stack,
+    });
 
     return res.status(500).json({
-      message: "Could not save order.",
+      message:
+        process.env.NODE_ENV === "production"
+          ? "Could not save order. Check the backend logs for details."
+          : err.message,
     });
   }
 });
