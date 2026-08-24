@@ -46,6 +46,14 @@ mongoose
   .catch((err) => console.error("❌ MongoDB error:", err));
 
 // ── Helpers ───────────────────────────────────────────────────────
+function ensureMongoConnection() {
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error(
+      `MongoDB is not connected (state ${mongoose.connection.readyState})`
+    );
+  }
+}
+
 function sha256(str) {
   return crypto.createHash("sha256").update(str).digest("hex");
 }
@@ -530,6 +538,8 @@ app.post("/api/orders", requireAuth, async (req, res) => {
 
 app.get("/api/orders", requireAuth, async (req, res) => {
   try {
+    ensureMongoConnection();
+
     const user = await getMongoUserFromClerk(req);
 
     if (!user) {
@@ -546,10 +556,18 @@ app.get("/api/orders", requireAuth, async (req, res) => {
 
     return res.json({ orders });
   } catch (err) {
-    console.error("Fetch orders error:", err);
+    console.error("Fetch orders error:", {
+      message: err.message,
+      name: err.name,
+      code: err.code,
+      stack: err.stack,
+    });
 
     return res.status(500).json({
-      message: "Could not fetch orders.",
+      message:
+        process.env.NODE_ENV === "production"
+          ? "Could not fetch orders. Check the backend logs for details."
+          : err.message,
     });
   }
 });
