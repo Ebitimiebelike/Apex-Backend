@@ -476,7 +476,7 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
   }
 });
 
-// Orders (unchanged)
+// Orders with Brevo email notification
 app.post("/api/orders", requireAuth, async (req, res) => {
   try {
     const {
@@ -517,6 +517,134 @@ app.post("/api/orders", requireAuth, async (req, res) => {
     });
 
     await order.save();
+
+    // Send thank you email via Brevo
+    try {
+      const itemsHtml = items.map(item => `
+        <tr>
+          <td style="padding: 12px; border-bottom: 1px solid #e8e4df;">
+            ${item.name}
+          </td>
+          <td style="padding: 12px; border-bottom: 1px solid #e8e4df; text-align: center;">
+            ${item.quantity}
+          </td>
+          <td style="padding: 12px; border-bottom: 1px solid #e8e4df; text-align: right;">
+            ₦${(item.price * 1600).toLocaleString()}
+          </td>
+        </tr>
+      `).join('');
+
+      const totalNaira = total * 1600;
+      const deliveryNaira = delivery === "express" ? 23900 : totalNaira >= 199000 ? 0 : 15900;
+      const grandTotal = totalNaira + deliveryNaira;
+
+      const emailHtml = `
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <meta charset="UTF-8">
+            <style>
+              body { font-family: Georgia, serif; line-height: 1.6; color: #1a1a1a; }
+              .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+              .header { background-color: #8b7355; color: white; padding: 20px; text-align: center; border-radius: 4px 4px 0 0; }
+              .content { background-color: #f9f7f5; padding: 30px; border-radius: 0 0 4px 4px; }
+              .order-section { margin-bottom: 30px; }
+              .order-section h3 { color: #8b7355; margin-bottom: 15px; font-size: 16px; }
+              table { width: 100%; border-collapse: collapse; }
+              .summary { background-color: white; padding: 15px; border-radius: 4px; margin-top: 20px; }
+              .summary-row { display: flex; justify-content: space-between; padding: 8px 0; }
+              .summary-row.total { font-weight: bold; font-size: 18px; color: #8b7355; border-top: 2px solid #8b7355; padding-top: 15px; margin-top: 15px; }
+              .footer { text-align: center; margin-top: 30px; color: #7a6e68; font-size: 14px; }
+              .address-box { background-color: white; padding: 15px; border-radius: 4px; margin-top: 10px; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <div class="header">
+                <h1>Thank You for Your Order!</h1>
+              </div>
+              <div class="content">
+                <p>Hi ${user.name || 'Valued Customer'},</p>
+                
+                <p>We're thrilled you chose Apex Home Furnishings! Your order has been confirmed and is being prepared for delivery.</p>
+
+                <div class="order-section">
+                  <h3>Order Number</h3>
+                  <p style="font-size: 18px; color: #8b7355; font-weight: bold;">${orderNumber}</p>
+                </div>
+
+                <div class="order-section">
+                  <h3>Order Details</h3>
+                  <table>
+                    <thead>
+                      <tr style="background-color: #e8e4df;">
+                        <th style="padding: 12px; text-align: left; font-weight: bold;">Product</th>
+                        <th style="padding: 12px; text-align: center; font-weight: bold;">Qty</th>
+                        <th style="padding: 12px; text-align: right; font-weight: bold;">Price</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${itemsHtml}
+                    </tbody>
+                  </table>
+                  <div class="summary">
+                    <div class="summary-row">
+                      <span>Subtotal:</span>
+                      <span>₦${totalNaira.toLocaleString()}</span>
+                    </div>
+                    <div class="summary-row">
+                      <span>Delivery (${delivery === 'express' ? 'Express' : 'Standard'}):</span>
+                      <span>₦${deliveryNaira.toLocaleString()}</span>
+                    </div>
+                    <div class="summary-row total">
+                      <span>Grand Total:</span>
+                      <span>₦${grandTotal.toLocaleString()}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="order-section">
+                  <h3>Delivery Address</h3>
+                  <div class="address-box">
+                    <p>${address}<br>${city}, ${postcode}</p>
+                  </div>
+                </div>
+
+                <div class="order-section">
+                  <h3>What's Next?</h3>
+                  <p>Our team will process your order and send you a tracking update within 24 hours. You'll receive regular updates on your order status via email.</p>
+                  <p><strong>Expected Delivery Time:</strong> ${delivery === 'express' ? '1-2 business days' : '3-5 business days'}</p>
+                </div>
+
+                <div class="order-section">
+                  <p><strong>Questions?</strong> Visit our website or contact our customer support team. We're here to help!</p>
+                </div>
+
+                <div class="footer">
+                  <p>Thank you for shopping with Apex Home Furnishings!</p>
+                  <p style="margin-top: 15px; color: #999;">© 2024 Apex Home Furnishings. All rights reserved.</p>
+                </div>
+              </div>
+            </div>
+          </body>
+        </html>
+      `;
+
+      await sendEmailBrevo({
+        to: user.email,
+        subject: `Order Confirmed - ${orderNumber} | Apex Home Furnishings`,
+        html: emailHtml,
+      });
+
+      console.log(`✅ Thank you email sent to ${user.email} for order ${orderNumber}`);
+    } catch (emailErr) {
+      console.error("Email sending error:", {
+        message: emailErr.message,
+        orderNumber,
+        userEmail: user.email,
+      });
+      // Don't fail the order if email fails - order is already saved
+    }
 
     return res.status(201).json({ order });
   } catch (err) {
