@@ -613,7 +613,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
                 <div class="order-section">
                   <h3>What's Next?</h3>
                   <p>Our team will process your order and send you a tracking update within 24 hours. You'll receive regular updates on your order status via email.</p>
-                  <p><strong>Expected Delivery Time:</strong> ${delivery === 'express' ? '1-2 business days' : '3-5 business days'}</p>
+                  <p><strong>Expected Delivery Time:</strong> ${delivery === 'express' ? '1-2 business days' : '4-7 business days'}</p>
                 </div>
 
                 <div class="order-section">
@@ -622,7 +622,7 @@ app.post("/api/orders", requireAuth, async (req, res) => {
 
                 <div class="footer">
                   <p>Thank you for shopping with Apex Home Furnishings!</p>
-                  <p style="margin-top: 15px; color: #999;">© 2024 Apex Home Furnishings. All rights reserved.</p>
+                  <p style="margin-top: 15px; color: #999;">© 2026 Apex Home Furnishings. All rights reserved.</p>
                 </div>
               </div>
             </div>
