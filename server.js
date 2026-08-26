@@ -700,7 +700,77 @@ app.get("/api/orders", requireAuth, async (req, res) => {
   }
 });
 
-app.get("/api/validate-checkout-email", async (req, res) => {  
+app.delete("/api/orders/:id", requireAuth, async (req, res) => {
+  try {
+    ensureMongoConnection();
+
+    const { reason } = req.body;
+
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({
+        message: "Please tell us why you're returning this order.",
+      });
+    }
+
+    const user = await getMongoUserFromClerk(req);
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found.",
+      });
+    }
+
+    const order = await Order.findOne({
+      _id: req.params.id,
+      userId: user._id,
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        message: "Order not found.",
+      });
+    }
+
+    // Record the return reason before the order is gone, so support
+    // can still follow up even though the order itself is deleted.
+    if (process.env.BREVO_SENDER_EMAIL) {
+      try {
+        await sendEmailBrevo({
+          to: process.env.BREVO_SENDER_EMAIL,
+          subject: `Return requested - ${order.orderNumber}`,
+          html: `
+            <div style="font-family: Arial, sans-serif;">
+              <p><strong>${user.name}</strong> (${user.email}) requested a return and deleted order <strong>${order.orderNumber}</strong>.</p>
+              <p><strong>Reason:</strong> ${reason}</p>
+            </div>
+          `,
+        });
+      } catch (emailErr) {
+        console.error("Return notification email failed:", emailErr.message);
+      }
+    }
+
+    await Order.deleteOne({ _id: order._id });
+
+    return res.json({ message: "Order deleted." });
+  } catch (err) {
+    console.error("Delete order error:", {
+      message: err.message,
+      name: err.name,
+      code: err.code,
+      stack: err.stack,
+    });
+
+    return res.status(500).json({
+      message:
+        process.env.NODE_ENV === "production"
+          ? "Could not delete order. Check the backend logs for details."
+          : err.message,
+    });
+  }
+});
+
+app.get("/api/validate-checkout-email", async (req, res) => {
   try {    
     const { email } = req.query;    
     if (!email) return res.status(400).json({ valid: false, message: "Email is required." });    
